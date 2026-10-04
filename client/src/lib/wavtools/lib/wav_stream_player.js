@@ -1,6 +1,17 @@
 import { StreamProcessorSrc } from './worklets/stream_processor.js';
 import { AudioAnalysis } from './analysis/audio_analysis.js';
 
+// ====== EFECTOS DE VOZ: PERSONALIZA AQUI ======
+const EFECTOS_ACTIVOS = true; // false = voz normal, sin efectos
+const VOZ_DIRECTA = 0.85; // volumen de la voz original (0 a 1)
+const REVERBERACION = 0.35; // cantidad de "salon" (0 = nada, 1 = mucho)
+const DURACION_SALON = 1.8; // segundos que dura la reverberacion (1 = cuarto, 3 = catedral)
+const ECO = 0.25; // volumen del eco (0 = sin eco, 0.6 = eco fuerte)
+const ECO_RETARDO = 0.18; // segundos entre la voz y su eco
+const ECO_REPETICIONES = 0.3; // cuanto se repite el eco (0 = una vez, 0.6 = varias)
+const METALICO = false; // true = toque robotico/digital
+// ==============================================
+
 /**
  * Plays audio streams received in raw PCM16 chunks from the browser
  * @class
@@ -17,6 +28,7 @@ export class WavStreamPlayer {
     this.context = null;
     this.stream = null;
     this.analyser = null;
+    this.input = null;
     this.trackSampleOffsets = {};
     this.interruptedTrackIds = {};
   }
@@ -40,7 +52,79 @@ export class WavStreamPlayer {
     analyser.fftSize = 8192;
     analyser.smoothingTimeConstant = 0.1;
     this.analyser = analyser;
+    this.input = this._crearEfectos();
     return true;
+  }
+
+  /**
+   * Crea la cadena de efectos de voz y devuelve el punto de entrada
+   * @private
+   */
+  _crearEfectos() {
+    const ctx = this.context;
+    if (!EFECTOS_ACTIVOS) return ctx.destination;
+
+    const entrada = ctx.createGain();
+    const salida = ctx.createGain();
+    salida.connect(ctx.destination);
+
+    // Toque metalico opcional (filtro de peine)
+    let fuente = entrada;
+    if (METALICO) {
+      const peine = ctx.createDelay(0.05);
+      peine.delayTime.value = 0.008;
+      const realimentacion = ctx.createGain();
+      realimentacion.gain.value = 0.55;
+      const mezcla = ctx.createGain();
+      entrada.connect(mezcla);
+      entrada.connect(peine);
+      peine.connect(realimentacion);
+      realimentacion.connect(peine);
+      peine.connect(mezcla);
+      fuente = mezcla;
+    }
+
+    // Voz directa
+    const directa = ctx.createGain();
+    directa.gain.value = VOZ_DIRECTA;
+    fuente.connect(directa);
+    directa.connect(salida);
+
+    // Reverberacion (salon generado por codigo)
+    if (REVERBERACION > 0) {
+      const largo = Math.max(1, Math.floor(ctx.sampleRate * DURACION_SALON));
+      const impulso = ctx.createBuffer(2, largo, ctx.sampleRate);
+      for (let c = 0; c < 2; c++) {
+        const datos = impulso.getChannelData(c);
+        for (let i = 0; i < largo; i++) {
+          datos[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / largo, 3);
+        }
+      }
+      const convolver = ctx.createConvolver();
+      convolver.buffer = impulso;
+      const reverb = ctx.createGain();
+      reverb.gain.value = REVERBERACION;
+      fuente.connect(convolver);
+      convolver.connect(reverb);
+      reverb.connect(salida);
+    }
+
+    // Eco
+    if (ECO > 0) {
+      const retardo = ctx.createDelay(2);
+      retardo.delayTime.value = ECO_RETARDO;
+      const repeticiones = ctx.createGain();
+      repeticiones.gain.value = Math.min(ECO_REPETICIONES, 0.9);
+      const eco = ctx.createGain();
+      eco.gain.value = ECO;
+      fuente.connect(retardo);
+      retardo.connect(repeticiones);
+      repeticiones.connect(retardo);
+      retardo.connect(eco);
+      eco.connect(salida);
+    }
+
+    return entrada;
   }
 
   /**
@@ -75,7 +159,7 @@ export class WavStreamPlayer {
    */
   _start() {
     const streamNode = new AudioWorkletNode(this.context, 'stream_processor');
-    streamNode.connect(this.context.destination);
+    streamNode.connect(this.input || this.context.destination);
     streamNode.port.onmessage = (e) => {
       const { event } = e.data;
       if (event === 'stop') {
