@@ -2,14 +2,16 @@ import { StreamProcessorSrc } from './worklets/stream_processor.js';
 import { AudioAnalysis } from './analysis/audio_analysis.js';
 
 // ====== EFECTOS DE VOZ: PERSONALIZA AQUI ======
+// Estilo "IA de pelicula": voz limpia y cercana, con un brillo digital sutil.
 const EFECTOS_ACTIVOS = true; // false = voz normal, sin efectos
-const VOZ_DIRECTA = 0.85; // volumen de la voz original (0 a 1)
-const REVERBERACION = 0.35; // cantidad de "salon" (0 = nada, 1 = mucho)
-const DURACION_SALON = 1.8; // segundos que dura la reverberacion (1 = cuarto, 3 = catedral)
-const ECO = 0.25; // volumen del eco (0 = sin eco, 0.6 = eco fuerte)
+const QUITAR_GRAVES_HZ = 120; // corta graves por debajo de esta frecuencia (voz mas limpia)
+const PRESENCIA_DB = 3; // realce en 3 kHz: voz mas clara y nitida (0 a 6)
+const AIRE_DB = 1.5; // realce en agudos: brillo "digital" (0 a 4)
+const SALON = 0.2; // reverberacion corta tipo cabina (0 = nada, 0.4 = notable)
+const DURACION_SALON = 0.12; // segundos de reverberacion (0.08 a 0.2 = cabina, mas de 0.5 = tunel)
+const BRILLO_DIGITAL = 0.15; // chorus sutil que da textura sintetica (0 a 0.4)
+const ECO = 0; // eco repetido (dejar en 0 para estilo IA; subir solo si lo quieres)
 const ECO_RETARDO = 0.18; // segundos entre la voz y su eco
-const ECO_REPETICIONES = 0.3; // cuanto se repite el eco (0 = una vez, 0.6 = varias)
-const METALICO = false; // true = toque robotico/digital
 // ==============================================
 
 /**
@@ -64,67 +66,77 @@ export class WavStreamPlayer {
     const ctx = this.context;
     if (!EFECTOS_ACTIVOS) return ctx.destination;
 
-    const entrada = ctx.createGain();
+    // Ecualizacion: limpia graves, realza presencia y aire
+    const graves = ctx.createBiquadFilter();
+    graves.type = 'highpass';
+    graves.frequency.value = QUITAR_GRAVES_HZ;
+    const presencia = ctx.createBiquadFilter();
+    presencia.type = 'peaking';
+    presencia.frequency.value = 3000;
+    presencia.Q.value = 0.9;
+    presencia.gain.value = PRESENCIA_DB;
+    const aire = ctx.createBiquadFilter();
+    aire.type = 'highshelf';
+    aire.frequency.value = 9000;
+    aire.gain.value = AIRE_DB;
+    graves.connect(presencia);
+    presencia.connect(aire);
+
     const salida = ctx.createGain();
     salida.connect(ctx.destination);
 
-    // Toque metalico opcional (filtro de peine)
-    let fuente = entrada;
-    if (METALICO) {
-      const peine = ctx.createDelay(0.05);
-      peine.delayTime.value = 0.008;
-      const realimentacion = ctx.createGain();
-      realimentacion.gain.value = 0.55;
-      const mezcla = ctx.createGain();
-      entrada.connect(mezcla);
-      entrada.connect(peine);
-      peine.connect(realimentacion);
-      realimentacion.connect(peine);
-      peine.connect(mezcla);
-      fuente = mezcla;
+    // Voz directa
+    aire.connect(salida);
+
+    // Brillo digital (chorus muy sutil)
+    if (BRILLO_DIGITAL > 0) {
+      const retardo = ctx.createDelay(0.05);
+      retardo.delayTime.value = 0.012;
+      const lfo = ctx.createOscillator();
+      lfo.frequency.value = 1.5;
+      const profundidad = ctx.createGain();
+      profundidad.gain.value = 0.002;
+      lfo.connect(profundidad);
+      profundidad.connect(retardo.delayTime);
+      lfo.start();
+      const nivel = ctx.createGain();
+      nivel.gain.value = BRILLO_DIGITAL;
+      aire.connect(retardo);
+      retardo.connect(nivel);
+      nivel.connect(salida);
     }
 
-    // Voz directa
-    const directa = ctx.createGain();
-    directa.gain.value = VOZ_DIRECTA;
-    fuente.connect(directa);
-    directa.connect(salida);
-
-    // Reverberacion (salon generado por codigo)
-    if (REVERBERACION > 0) {
+    // Reverberacion corta tipo cabina
+    if (SALON > 0) {
       const largo = Math.max(1, Math.floor(ctx.sampleRate * DURACION_SALON));
       const impulso = ctx.createBuffer(2, largo, ctx.sampleRate);
       for (let c = 0; c < 2; c++) {
         const datos = impulso.getChannelData(c);
         for (let i = 0; i < largo; i++) {
-          datos[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / largo, 3);
+          datos[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / largo, 4);
         }
       }
       const convolver = ctx.createConvolver();
       convolver.buffer = impulso;
-      const reverb = ctx.createGain();
-      reverb.gain.value = REVERBERACION;
-      fuente.connect(convolver);
-      convolver.connect(reverb);
-      reverb.connect(salida);
+      const nivel = ctx.createGain();
+      nivel.gain.value = SALON;
+      aire.connect(convolver);
+      convolver.connect(nivel);
+      nivel.connect(salida);
     }
 
-    // Eco
+    // Eco opcional (desactivado por defecto)
     if (ECO > 0) {
       const retardo = ctx.createDelay(2);
       retardo.delayTime.value = ECO_RETARDO;
-      const repeticiones = ctx.createGain();
-      repeticiones.gain.value = Math.min(ECO_REPETICIONES, 0.9);
-      const eco = ctx.createGain();
-      eco.gain.value = ECO;
-      fuente.connect(retardo);
-      retardo.connect(repeticiones);
-      repeticiones.connect(retardo);
-      retardo.connect(eco);
-      eco.connect(salida);
+      const nivel = ctx.createGain();
+      nivel.gain.value = ECO;
+      aire.connect(retardo);
+      retardo.connect(nivel);
+      nivel.connect(salida);
     }
 
-    return entrada;
+    return graves;
   }
 
   /**
