@@ -6,6 +6,7 @@ dotenv.config();
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const MODEL = process.env.OPENAI_MODEL || "gpt-realtime";
 const VOICE = process.env.OPENAI_VOICE || "marin";
+const EAGERNESS = process.env.VAD_EAGERNESS || "medium"; // low = espera mas, high = responde mas rapido
 const PORT = 3000;
 
 if (!OPENAI_API_KEY) {
@@ -58,7 +59,7 @@ wss.on("connection", (ws, req) => {
           audio: {
             input: {
               format: { type: "audio/pcm", rate: 24000 },
-              turn_detection: { type: "server_vad" },
+              turn_detection: { type: "semantic_vad", eagerness: EAGERNESS },
             },
             output,
           },
